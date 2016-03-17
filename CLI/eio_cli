@@ -21,14 +21,15 @@
 from ctypes import *
 from fcntl import *
 from argparse import ArgumentParser
-import sys,struct
+import sys
+import struct
 import subprocess
 import os
 import re
 
-#TBD : Change ioctl numbers to comply with linux kernel convention
+# TBD : Change ioctl numbers to comply with linux kernel convention
 EIODEV = '/dev/eiodev'
-EIO_IOC_CREATE = 1104168192 
+EIO_IOC_CREATE = 1104168192
 EIO_IOC_DELETE = 1104168193
 EIO_IOC_ENABLE = 1104168194
 EIO_IOC_DISABLE = 1104168195
@@ -41,12 +42,21 @@ EIO_IOC_SRC_ADD = 1104168201
 EIO_IOC_SRC_REMOVE = 1104168202
 IOC_BLKGETSIZE64 = 0x80081272
 IOC_SECTSIZE = 0x1268
-SUCCESS=0
-FAILURE=3
+SUCCESS = 0
+FAILURE = 3
 
-FIOCMD="fio --rw=randrw --verify=meta --verify_pattern=0x3982 --ioengine=libaio \
-	--iodepth=16 --direct=1 --size=1G --bsrange=512-128K --numjobs=10 \
-	--group_reporting --time_based --runtime=180 --name=job1 --filename="
+MODE_ID_TO_DESC = {3: "Write Through", 1: "Write Back", 2: "Read Only"}
+# XXX: really, IDS and NAMES should be reversed, but both are confusing
+MODE_IDS = {"wt": 3, "wb": 1, "ro": 2}
+MODE_NAMES = {v: k for k, v in MODE_IDS.viewitems()}
+POLICY_NAMES = {3: "rand", 1: "fifo", 2: "lru"}
+POLICY_IDS = {v: k for k, v in POLICY_NAMES.viewitems()}
+BLKSIZES = [2048, 4096, 8192]
+ASSOCIATIVITY = {2048: 128, 4096: 256, 8192: 512}
+
+FIOCMD = "fio --rw=randrw --verify=meta --verify_pattern=0x3982 --ioengine=libaio \
+        --iodepth=16 --direct=1 --size=1G --bsrange=512-128K --numjobs=10 \
+        --group_reporting --time_based --runtime=180 --name=job1 --filename="
 
 udev_template = """
 ACTION!="add|change", GOTO="EIO_EOF"
@@ -101,7 +111,7 @@ GOTO="EIO_EOF"
 
 TEST!="/proc/enhanceio/<cache_name>", \
 TEST!="/dev/enhanceio/<cache_name>/.eio_delete", ACTION!="change", NAME=""
-	
+
 TEST=="/dev/enhanceio/<cache_name>/.ssd_name", GOTO="EIO_SETUP"
 
 GOTO="EIO_EOF"
@@ -141,529 +151,531 @@ enable -d /dev/$env{disk_name} -s /dev/$env{ssd_name} -m <mode> \
 LABEL="EIO_EOF"
 """
 
+
 def make_udev_match_expr(dev_path, cache_name):
-	dict_udev = {}
-	status = run_cmd("udevadm info --query=property --name=" + dev_path)
-	for line in status.output.split('\n'):
-		if line is not '':
-			temp = line.split("=", 1)
-			dict_udev[temp[0].strip()] = temp[1].strip()
+    dict_udev = {}
+    status = run_cmd("udevadm info --query=property --name=" + dev_path)
+    for line in status.output.split('\n'):
+        if line is not '':
+            temp = line.split("=", 1)
+            dict_udev[temp[0].strip()] = temp[1].strip()
 
-	# DM devices
-	if dict_udev["DEVTYPE"] == "disk" and "DM_UUID" in dict_udev:
-		match_expr='ENV{DM_UUID}=="'+ dict_udev["DM_UUID"] + \
-			 '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] +'"'
-		return	match_expr
+    # DM devices
+    if dict_udev["DEVTYPE"] == "disk" and "DM_UUID" in dict_udev:
+        match_expr = 'ENV{DM_UUID}=="' + dict_udev["DM_UUID"] + \
+            '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
+        return match_expr
 
-	# MD devices
-	if "MD_UUID" in dict_udev:
-		if dict_udev["DEVTYPE"] == "disk" and \
-		"MD_DEV_UUID" not in dict_udev: 
-			match_expr='ENV{MD_UUID}=="' + dict_udev["MD_UUID"] + \
-			'", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
-			return match_expr
+    # MD devices
+    if "MD_UUID" in dict_udev:
+        if dict_udev["DEVTYPE"] == "disk" and \
+                "MD_DEV_UUID" not in dict_udev:
+            match_expr = 'ENV{MD_UUID}=="' + dict_udev["MD_UUID"] + \
+                '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
+            return match_expr
 
-		elif dict_udev["DEVTYPE"] == "partition":
-			try:
-				with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
-					partition_num = f.read().strip()
-					match_expr='ENV{MD_UUID}=="' + \
-					'", ENV{MD_DEV_UUID}=="' + \
-					'", ATTR{partition}=="' + partition_num + '"'
-					return match_expr	
-			except IOError as e:
-				pass
+        elif dict_udev["DEVTYPE"] == "partition":
+            try:
+                with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
+                    partition_num = f.read().strip()
+                    match_expr = 'ENV{MD_UUID}=="' + \
+                        '", ENV{MD_DEV_UUID}=="' + \
+                        '", ATTR{partition}=="' + partition_num + '"'
+                    return match_expr
+            except IOError as e:
+                pass
 
-	# Partition
-	if dict_udev["DEVTYPE"] == "partition" and "ID_SERIAL" in dict_udev:
-		try:
-			with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
-				partition_num = f.read().strip()
-				match_expr='ENV{ID_SERIAL}=="' + \
-				dict_udev["ID_SERIAL"] + \
-				'", ATTR{partition}=="' + partition_num + '"'
-				return match_expr
-		except IOError as e:
-			pass
+    # Partition
+    if dict_udev["DEVTYPE"] == "partition" and "ID_SERIAL" in dict_udev:
+        try:
+            with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
+                partition_num = f.read().strip()
+                match_expr = 'ENV{ID_SERIAL}=="' + \
+                    dict_udev["ID_SERIAL"] + \
+                    '", ATTR{partition}=="' + partition_num + '"'
+                return match_expr
+        except IOError:
+            pass
 
+    # Disk
+    if dict_udev["DEVTYPE"] == "disk" and "ID_SERIAL" in dict_udev:
+        match_expr = 'ENV{ID_SERIAL}=="' + dict_udev["ID_SERIAL"] + \
+            '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
+        return match_expr
 
-	# Disk
-	if dict_udev["DEVTYPE"] == "disk" and "ID_SERIAL" in dict_udev :
-		match_expr='ENV{ID_SERIAL}=="'+ dict_udev["ID_SERIAL"] + \
-		'", ENV{DEVTYPE}=="'+ dict_udev["DEVTYPE"] +'"'
-		return match_expr
-
-	# Partition or disk w/ filesystem
-	if "ID_FS_UUID" in dict_udev:
-		match_expr= 'ENV{DM_NAME}!="' + cache_name + \
-		'", ENV{ID_FS_UUID}=="' + dict_udev["ID_FS_UUID"] + '"'
-		return match_expr
+    # Partition or disk w/ filesystem
+    if "ID_FS_UUID" in dict_udev:
+        match_expr = 'ENV{DM_NAME}!="' + cache_name + \
+            '", ENV{ID_FS_UUID}=="' + dict_udev["ID_FS_UUID"] + '"'
+        return match_expr
 
 
 def run_cmd(cmd):
-	#Utility function that runs a command
-	process = subprocess.Popen(cmd, stdout=subprocess.PIPE,\
-				stderr=subprocess.STDOUT,shell=True)
-	output = process.stdout.read()
-	ret = process.wait()
-	status = Status(output,ret)
-	return status
-
+    # Utility function that runs a command
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, shell=True)
+    output = process.stdout.read()
+    ret = process.wait()
+    status = Status(output, ret)
+    return status
 
 
 def get_caches_list():
-	
-	#Utility function that obtains cache list 
-	cache_list = [f for f in os.listdir('/proc/enhanceio/')]
-	for name in cache_list:
-		if name == "version":
-			cache_list.remove(name)
-	return cache_list
+
+    # Utility function that obtains cache list
+    cache_list = [f for f in os.listdir('/proc/enhanceio/')]
+    for name in cache_list:
+        if name == "version":
+            cache_list.remove(name)
+    return cache_list
+
 
 def sanity(hdd, ssd):
-	# Performs a very basic regression of operations			
-				
-	modes = {3:"Write Through", 1:"Write Back", 2:"Read Only",0:"N/A"}
-	policies = {3:"rand", 1:"fifo", 2:"lru", 0:"N/A"}		
-	blksizes = {"4096":4096, "2048":2048, "8192":8192,"":0}	
-	for mode in ["wb","wt","ro"]:
-		for policy in ["rand","fifo","lru"]:
-			for blksize in ["4096","2048","8192"]:
-				cache = Cache_rec(name = "test_cache", src_name = hdd,\
-						ssd_name = ssd, policy = policy, mode = mode,\
-						blksize = blksize)
-				cache.create()
-				run_cmd(FIOCMD + hdd)
-				cache.delete()
-	
+    # Performs a very basic regression of operations
 
-# Class that represents cache. Also used to pass ioctl to driver 
+    for mode in MODE_IDS.viewkeys():
+        for policy in POLICY_IDS.viewkeys():
+            for blksize in BLKSIZES:
+                cache = Cache_rec(name="test_cache", src_name=hdd,
+                                  ssd_name=ssd, policy=policy, mode=mode,
+                                  blksize=blksize)
+                cache.create()
+                run_cmd(FIOCMD + hdd)
+                cache.delete()
+
+
+# Class that represents cache. Also used to pass ioctl to driver
 class Cache_rec(Structure):
-	_fields_ = [
-	("name", c_char * 32),
-	("src_name", c_char * 128),
-	("ssd_name", c_char * 128),
-	("ssd_uuid", c_char * 128),
-        ("src_size", c_ulonglong),	
-	("ssd_size", c_ulonglong),
+    _fields_ = [
+        ("name", c_char * 32),
+        ("src_name", c_char * 128),
+        ("ssd_name", c_char * 128),
+        ("ssd_uuid", c_char * 128),
+        ("src_size", c_ulonglong),
+        ("ssd_size", c_ulonglong),
         ("src_sector_size", c_uint),
         ("ssd_sector_size", c_uint),
-	("flags", c_uint),
+        ("flags", c_uint),
         ("policy", c_byte),
         ("mode", c_byte),
         ("persistence", c_byte),
         ("cold_boot", c_byte),
         ("blksize", c_ulonglong),
         ("assoc", c_ulonglong)
-	]
-	def __init__(self, name, src_name="", ssd_name="", src_size=0,\
-		     ssd_size=0, src_sector_size=0, ssd_sector_size=0,\
-		     flags=0, policy="", mode="", persistence=0, cold_boot="",\
-		     blksize="", assoc=""): 
-	
-		modes = {"wt":3,"wb":1,"ro":2,"":0}
-		policies = {"rand":3,"fifo":1, "lru":2,"":0}
-		blksizes = {"4096":4096, "2048":2048, "8192":8192,"":0}	
-		associativity = {2048:128, 4096:256, 8192:512,0:0}
-		
-		self.name = name
-		self.src_name =src_name
-		self.ssd_name = ssd_name
-		self.src_size = src_size	
-		self.src_sector_size = src_sector_size
-		self.ssd_size = ssd_size
-		self.ssd_sector_size = ssd_sector_size
-		self.flags = flags
-		self.policy = policies[policy] 
-		self.mode = modes[mode]
-		self.persistence = persistence
-		self.blksize = blksizes[blksize]
-		self.assoc = associativity[self.blksize]		 
+    ]
 
-	
-	def print_info(self):
-	
-		# Display Cache info 
-		modes = {3:"Write Through", 1:"Write Back", 2:"Read Only",0:"N/A"}
-		policies = {3:"rand", 1:"fifo", 2:"lru", 0:"N/A"}
+    def __init__(self, name, src_name="", ssd_name="", src_size=0,
+                 ssd_size=0, src_sector_size=0, ssd_sector_size=0,
+                 flags=0, policy="", mode="", persistence=0, cold_boot="",
+                 blksize="", assoc=""):
+        self.name = name
+        self.src_name = src_name
+        self.ssd_name = ssd_name
+        self.src_size = src_size
+        self.src_sector_size = src_sector_size
+        self.ssd_size = ssd_size
+        self.ssd_sector_size = ssd_sector_size
+        self.flags = flags
+        self.policy = POLICY_IDS[policy]
+        self.mode = MODE_IDS[mode]
+        self.persistence = persistence
+        self.blksize = int(blksize)
+        self.assoc = ASSOCIATIVITY[self.blksize]
 
-		print "Cache Name       : " + self.name 
-		print "Source Device    : " + self.src_name 
-		print "SSD Device       : " + self.ssd_name
-		print "Policy           : " + policies[self.policy] 
-		print "Mode             : " + modes[self.mode]
-		print "Block Size       : " + str(self.blksize)	
-		print "Associativity    : " + str(self.assoc)	
+    def print_info(self):
 
-		if os.path.exists("/proc/enhanceio/" + self.name):
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep state"
-			status = run_cmd(cmd)
-			print "State            : " + status.output.split()[1]
-	
-		pass
+        # Display Cache info
+
+        print "Cache Name       : " + self.name
+        print "Source Device    : " + self.src_name
+        print "SSD Device       : " + self.ssd_name
+        print "Policy           : " + POLICY_NAMES[self.policy]
+        print "Mode             : " + MODE_ID_TO_DESC[self.mode]
+        print "Block Size       : " + str(self.blksize)
+        print "Associativity    : " + str(self.assoc)
+
+        if os.path.exists("/proc/enhanceio/" + self.name):
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep state"
+            status = run_cmd(cmd)
+            print "State            : " + status.output.split()[1]
+
+        pass
+
+    def do_eio_ioctl(self, IOC_TYPE):
+        # send ioctl to driver
+        fd = open(EIODEV, "r")
+        fmt = ''
+        try:
+            if ioctl(fd, IOC_TYPE, addressof(self)) == SUCCESS:
+                return SUCCESS
+        except Exception as e:
+            print e
+        return FAILURE
+
+    def clean(self):
+        # do sysctl corresponding to clean
+        cmd = "/sbin/sysctl dev.enhanceio." + self.name + ".do_clean=1"
+        print cmd
+        run_cmd(cmd)
+        pass
+
+    def get_cache_info(self):
+        # function to extract information from /proc/enhanceio
+        status = Status()
+
+        cache_data_dir = os.path.join("/proc/enhanceio", self.name)
+        if os.path.exists(cache_data_dir):
+
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep src_name"
+            status = run_cmd(cmd)
+            self.src_name = status.output.split()[1]
+
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep ssd_name"
+            status = run_cmd(cmd)
+            self.ssd_name = status.output.split()[1]
+
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep mode"
+            status = run_cmd(cmd)
+            self.mode = int(status.output.split()[1])
+
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep eviction"
+            status = run_cmd(cmd)
+            self.policy = int(status.output.split()[1])
+
+            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep block_size"
+            status = run_cmd(cmd)
+            self.blksize = int(status.output.split()[1])
+
+            self.assoc = ASSOCIATIVITY[self.blksize]
+
+            return SUCCESS
+
+        return FAILURE
+
+    def create(self):
+
+        src_sz = Dev_info()
+        src_sz.get_device_size_info(self.src_name)
+        self.src_size = src_sz.dev_size
+        self.src_sector_size = src_sz.dev_sect_size
+
+        ssd_sz = Dev_info()
+        ssd_sz.get_device_size_info(self.ssd_name)
+        self.ssd_size = ssd_sz.dev_size
+        self.ssd_sector_size = ssd_sz.dev_sect_size
+
+        self.print_info()
+        if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
+            self.create_rules()
+            print 'Cache created successfully'
+            return SUCCESS
+        else:
+            print 'Cache creation failed ' + \
+                '(dmesg can provide you more info)'
+
+        return FAILURE
+
+    def edit(self):
+        mode = self.mode
+        policy = self.policy
+        if self.get_cache_info() == SUCCESS:
+            if mode != 0:
+                self.mode = mode
+            if policy != 0:
+                self.policy = policy
+
+            if self.do_eio_ioctl(EIO_IOC_EDIT) == SUCCESS:
+                self.create_rules()
+                print 'Cache edited Successfully'
+                return SUCCESS
+            else:
+                print 'Edit cache failed ' + \
+                    '(dmesg can provide you more info)'
+        else:
+            print 'Requested cache not found'
+
+        return FAILURE
+
+    def create_rules(self):
+
+        source_match_expr = make_udev_match_expr(self.src_name, self.name)
+        print source_match_expr
+        cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
+        print cache_match_expr
+
+        try:
+            # XXX: move to format
+            udev_rule = udev_template.replace("<cache_name>", self.name)
+            udev_rule = udev_rule.replace(
+                "<source_match_expr>", source_match_expr)
+            udev_rule = udev_rule.replace(
+                "<cache_match_expr>", cache_match_expr)
+            udev_rule = udev_rule.replace("<mode>", MODE_NAMES[self.mode])
+            udev_rule = udev_rule.replace("<block_size>", str(self.blksize))
+            udev_rule = udev_rule.replace("<policy>", POLICY_NAMES[self.policy])
+
+            # write rule file
+            rule_file_path = os.path.join(
+                "/etc/udev/rules.d, 94-enhanceio-%s.rules" % self.name)
+            rule_file = open(rule_file_path, "w")
+            rule_file.write(udev_rule)
+            return SUCCESS
+
+        except Exception as e:
+            print "Creation of udev rules file failed\n"
+            print e
+            return FAILURE
+
+    def delete(self):
+
+        if self.get_cache_info() == FAILURE:
+            print "No cache exists with the name " + self.name
+            return FAILURE
+
+        delete_fn = os.path.join("/dev/enhanceio", self.name, ".eio_delete")
+        run_cmd("/bin/touch %s" % delete_fn)
+
+        if self.do_eio_ioctl(EIO_IOC_DELETE) == SUCCESS:
+            if self.delete_rules() == SUCCESS:
+                return SUCCESS
+        else:
+            print 'Cache deletion failed (dmesg can provide you more info)'
+
+        os.remove(delete_fn)
+
+        return FAILURE
+
+    def delete_rules(self):
+
+        rule_file_path = os.path.join(
+            "/etc/udev/rules.d, 94-enhanceio-%s.rules" % self.name)
+        print "Removing file" + rule_file_path
+        try:
+            os.remove(rule_file_path)
+            print "Done removing rule file"
+            return SUCCESS
+        except Exception as e:
+            print "Unable to delete rule file" + \
+                "(please remove it manually)"
+            print e
+        return FAILURE
 
 
-	def do_eio_ioctl(self,IOC_TYPE):
-		#send ioctl to driver
-		fd = open(EIODEV, "r")
-		fmt = ''
-		try:
-			if ioctl(fd, IOC_TYPE, addressof(self)) == SUCCESS:
-				return SUCCESS
-		except Exception as e:
-			print e
-		return FAILURE
-
-		
-	def clean(self):
-		#do sysctl corresponding to clean
-		cmd = "/sbin/sysctl dev.enhanceio." + self.name + ".do_clean=1"
-		print cmd
-		run_cmd(cmd)	
-		pass
-
-	
-	def get_cache_info(self):
-		#function to extract information from /proc/enhanceio
-		status = Status()
-		
-		if os.path.exists("/proc/enhanceio/" + self.name):
-
-			associativity = {2048:128, 4096:256, 8192:512,0:0}
-				
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep src_name" 
-			status = run_cmd(cmd)
-			self.src_name =  status.output.split()[1]
-
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep ssd_name"
-			status = run_cmd(cmd)
-			self.ssd_name = status.output.split()[1]
-	
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep mode"
-			status = run_cmd(cmd)
-			self.mode = int(status.output.split()[1])
-
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep eviction"
-			status = run_cmd(cmd)
-			self.policy = int(status.output.split()[1])
-
-			cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep block_size"
-			status = run_cmd(cmd)
-			self.blksize = int(status.output.split()[1])
-
-			self.assoc = associativity[self.blksize]
-			
-			return SUCCESS
-
-		return FAILURE
-
-
-	def create(self):		 
-
-		src_sz = Dev_info() 
-		src_sz.get_device_size_info(self.src_name)
-		self.src_size = src_sz.dev_size
-		self.src_sector_size = src_sz.dev_sect_size
-
-		ssd_sz = Dev_info()
-		ssd_sz.get_device_size_info(self.ssd_name)
-		self.ssd_size = ssd_sz.dev_size
-		self.ssd_sector_size = ssd_sz.dev_sect_size
-
-		self.print_info()	
-		if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
-			self.create_rules()
-			print 'Cache created successfully'
-			return SUCCESS
-		else: 	
-			print 'Cache creation failed ' + \
-			'(dmesg can provide you more info)'
-	
-		return FAILURE
-
-		
-	def edit(self):
-		mode = self.mode
-		policy = self.policy
-		if self.get_cache_info() == SUCCESS:
-			if mode != 0:
-				self.mode = mode
-			if policy != 0:
-				self.policy = policy
-			
-			if self.do_eio_ioctl(EIO_IOC_EDIT) == SUCCESS:
-				self.create_rules()
-				print 'Cache edited Successfully'
-				return SUCCESS
-			else:
-				print 'Edit cache failed ' + \
-				'(dmesg can provide you more info)'
-		else:
-			print 'Requested cache not found'
-		
-		return FAILURE
-
-
-	def create_rules(self):
-		
-		source_match_expr = make_udev_match_expr(self.src_name, self.name)
-		print source_match_expr
-		cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
-		print cache_match_expr
-		modes = {3:"wt", 1:"wb", 2:"ro",0:"N/A"}
-		policies = {3:"rand", 1:"fifo", 2:"lru", 0:"N/A"}
-	
-		try: 	
-			udev_rule = udev_template.replace("<cache_name>",\
-				    self.name).replace("<source_match_expr>",\
-				    source_match_expr).replace("<cache_match_expr>",\
-				    cache_match_expr).replace("<mode>",\
-				    modes[self.mode]).replace("<block_size>",\
-				    str(self.blksize)).replace("<policy>",\
-				    policies[self.policy])	
-
-			# write rule file
-			rule_file_path = "/etc/udev/rules.d/94-enhanceio-" + \
-					self.name + ".rules" 
-			rule_file = open(rule_file_path, "w")
-			rule_file.write(udev_rule)
-			return SUCCESS
-
-		except Exception as e:
-			print "Creation of udev rules file failed\n" 
-			print e
- 			return FAILURE
-
-	def delete(self):
-
-		if self.get_cache_info() == FAILURE:
-			print "No cache exists with the name " + self.name
-			return FAILURE
-
-		run_cmd("/bin/touch /dev/enhanceio/" + self.name + "/.eio_delete")
-
-		if self.do_eio_ioctl(EIO_IOC_DELETE) == SUCCESS:
-			if self.delete_rules() == SUCCESS:
-				return SUCCESS
-		else: 	
-			print 'Cache deletion failed (dmesg can provide you more info)'
-		
-		run_cmd("/bin/rm -f /dev/enhanceio/" + self.name + "/.eio_delete")
-		
-		return FAILURE
-
-						
-	def delete_rules(self):
-				
-		rule_file_path = "/etc/udev/rules.d/94-enhanceio-" + self.name + ".rules" 
-		print "Removing file" + rule_file_path
-		try:	
-			os.remove(rule_file_path)
-			print "Done removing rule file"
-			return SUCCESS
-		except Exception as e:
-			print "Unable to delete rule file" + \
-			"(please remove it manually)"
-			print e
-		return FAILURE
-	
 class Status:
-	output = ""
-	ret = 0
+    output = ""
+    ret = 0
 
-	def __init__(self, outstr="", outret=0):
-		self.output = outstr
-		self.ret = outret			
-		pass
+    def __init__(self, outstr="", outret=0):
+        self.output = outstr
+        self.ret = outret
+        pass
 
-#Block Device class 
+# Block Device class
+
+
 class Dev_info:
-		
-	dev_size = 0 	
-	dev_sect_size = 0
 
-	def get_device_size_info(self,name):
-		fd = open(name,"r")
-		
-		status = run_cmd("blockdev --getsize64 "+ name);
-		self.dev_size = int(status.output.split()[0])
+    dev_size = 0
+    dev_sect_size = 0
 
-		status = run_cmd("blockdev --getss "+ name);
-                self.dev_sect_size = int(status.output.split()[0])
-		
-		pass
+    def get_device_size_info(self, name):
+        if not os.access(name, os.R_OK):
+            raise OSError('Device %s cannot be accessed' % name)
+
+        status = run_cmd("blockdev --getsize64 " + name)
+        self.dev_size = int(status.output.split()[0])
+
+        status = run_cmd("blockdev --getss " + name)
+        self.dev_sect_size = int(status.output.split()[0])
+
+        pass
+
 
 def create_parser():
 
+    mainparser = ArgumentParser()
+    parser = mainparser.add_subparsers()
 
-	mainparser = ArgumentParser()
-	parser = mainparser.add_subparsers()		
+    # delete
+    parser_delete = parser.add_parser('delete', help='used to delete cache')
+    parser_delete.add_argument(
+        "-c", action="store", dest="cache", required=True)
 
-	#delete
-	parser_delete = parser.add_parser('delete', help='used to delete cache')
-	parser_delete.add_argument("-c", action="store", dest= "cache",required=True)
+    # edit
+    parser_edit = parser.add_parser('edit', help="used to edit \
+                                        cache policy or mode or both")
+    parser_edit.add_argument("-c", action="store",
+                             dest="cache", required=True)
+    parser_edit.add_argument(
+            "-m", action="store", dest="mode", choices=MODE_IDS,
+            help="cache mode", default="")
+    parser_edit.add_argument("-p", action="store", dest="policy",
+                             choices=POLICY_IDS, help="cache "
+                             "replacement policy", default="")
 
-	#edit
-	parser_edit = parser.add_parser('edit', help="used to edit \
-					cache policy or mode or both")
-	parser_edit.add_argument("-c", action="store",  dest="cache",required=True)
-	parser_edit.add_argument("-m", action="store", dest="mode", \
-			choices=["wb","wt","ro"], help="cache mode",default="")
-	parser_edit.add_argument("-p", action="store", dest="policy", \
-				choices=["rand","fifo","lru"], help="cache \
-				replacement policy",default="") 
-	
-	#info
-	parser_info = parser.add_parser('info', help='displays information \
-					about currently create caches')
-	
-	#clean
-	parser_clean = parser.add_parser('clean', help='clean the dirty blocks \
-				in the cache (Applicable only to writeback caches)')
-	parser_clean.add_argument("-c", action="store", dest="cache",required=True)
-	
-	#create
-	parser_create = parser.add_parser('create', help="create")
-	parser_create.add_argument("-d", action="store", dest="hdd",\
-				required=True, help="name of the source device")
-	parser_create.add_argument("-s", action="store", dest="ssd",\
-				required=True, help="name of the ssd device")
-	parser_create.add_argument("-p", action="store", dest="policy",\
-				   choices=["rand","fifo","lru"],\
-				   help="cache replacement policy",default="lru")
-	parser_create.add_argument("-m", action="store", dest="mode",\
-				   choices=["wb","wt","ro"],\
-				   help="cache mode",default="wt")
-	parser_create.add_argument("-b", action="store", dest="blksize",\
-				   choices=["2048","4096","8192"],\
-				   default="4096" ,help="block size for cache")
-	parser_create.add_argument("-c", action="store", dest="cache", required=True)
-	
-	#enable
-	parser_enable = parser.add_parser('enable', help='used to enable cache')
-	parser_enable.add_argument("-d", action="store", dest="hdd",\
-				   required=True, help="name of the source device")
-	parser_enable.add_argument("-s", action="store", dest="ssd",\
-				   required=True, help="name of the ssd device")
-	parser_enable.add_argument("-p", action="store", dest="policy",
-				   choices=["rand","fifo","lru"],\
-				   help="cache replacement policy",default="lru")
-	parser_enable.add_argument("-m", action="store", dest="mode",\
-				   choices=["wb","wt","ro"],\
-				   help="cache mode",default="wt")
-	parser_enable.add_argument("-b", action="store", dest="blksize",\
-				   choices=["2048","4096","8192"],\
-				   default="4096" ,help="block size for cache")
-	parser_enable.add_argument("-c", action="store", dest="cache", required=True)
+    # info
+    parser_info = parser.add_parser('info', help='displays information '
+                                    'about currently create caches')
 
-	#notify
-	parser_notify = parser.add_parser('notify')
-	parser_notify.add_argument("-s", action="store", dest="ssd",\
-				   help="name of the ssd device")
-	parser_notify.add_argument("-a", action="store", dest="action",\
-				    help="add/remove/reboot")
-	parser_notify.add_argument("-d", action="store", dest="hdd",\
-				    help="name of the source device")
-	parser_notify.add_argument("-c", action="store", dest="cache", required=True)
+    # clean
+    parser_clean = parser.add_parser(
+        'clean', help='clean the dirty blocks in the cache '
+        '(Applicable only to writeback caches)')
+    parser_clean.add_argument("-c", action="store",
+                              dest="cache", required=True)
 
-	#sanity
-	parser_sanity = parser.add_parser('sanity')
-	parser_sanity.add_argument("-s", action="store", dest="ssd",\
-			          required=True, help="name of the ssd device")
-	parser_sanity.add_argument("-d", action="store", dest="hdd",\
-				  required=True, help="name of the source device")
-	return mainparser
+    # create
+    parser_create = parser.add_parser('create', help="create")
+    parser_create.add_argument("-d", action="store", dest="hdd",
+                               required=True, help="name of the source device")
+    parser_create.add_argument("-s", action="store", dest="ssd",
+                               required=True, help="name of the ssd device")
+    parser_create.add_argument("-p", action="store", dest="policy",
+                               choices=POLICY_IDS,
+                               help="cache replacement policy", default="lru")
+    parser_create.add_argument("-m", action="store", dest="mode",
+                               choices=MODE_IDS,
+                               help="cache mode", default="wt")
+    parser_create.add_argument("-b", action="store", dest="blksize",
+                               type=int, choices=BLKSIZES, default=4096,
+                               help="block size for cache")
+    parser_create.add_argument(
+        "-c", action="store", dest="cache", required=True)
+
+    # enable
+    parser_enable = parser.add_parser('enable', help='used to enable cache')
+    parser_enable.add_argument("-d", action="store", dest="hdd",
+                               required=True, help="name of the source device")
+    parser_enable.add_argument("-s", action="store", dest="ssd",
+                               required=True, help="name of the ssd device")
+    parser_enable.add_argument("-p", action="store", dest="policy",
+                               choices=["rand", "fifo", "lru"],
+                               help="cache replacement policy", default="lru")
+    parser_enable.add_argument("-m", action="store", dest="mode",
+                               choices=MODE_IDS,
+                               help="cache mode", default="wt")
+    parser_enable.add_argument("-b", action="store", dest="blksize",
+                               choices=BLKSIZES, type=int,
+                               default=4096, help="block size for cache")
+    parser_enable.add_argument(
+        "-c", action="store", dest="cache", required=True)
+
+    # notify
+    parser_notify = parser.add_parser('notify')
+    parser_notify.add_argument("-s", action="store", dest="ssd",
+                               help="name of the ssd device")
+    parser_notify.add_argument("-a", action="store", dest="action",
+                               help="add/remove/reboot")
+    parser_notify.add_argument("-d", action="store", dest="hdd",
+                               help="name of the source device")
+    parser_notify.add_argument(
+        "-c", action="store", dest="cache", required=True)
+
+    # sanity
+    parser_sanity = parser.add_parser('sanity')
+    parser_sanity.add_argument("-s", action="store", dest="ssd",
+                               required=True, help="name of the ssd device")
+    parser_sanity.add_argument("-d", action="store", dest="hdd",
+                               required=True, help="name of the source device")
+    return mainparser
+
+
+def setup_kernel_modules():
+    run_cmd("/sbin/modprobe enhanceio")
+    run_cmd("/sbin/modprobe enhanceio_fifo")
+    run_cmd("/sbin/modprobe enhanceio_lru")
+    run_cmd("/sbin/modprobe enhanceio_rand")
+
 
 def main():
-	 	
-	mainparser = create_parser()
-	args = mainparser.parse_args()
 
-	run_cmd("/sbin/modprobe enhanceio")
-	run_cmd("/sbin/modprobe enhanceio_fifo")
-	run_cmd("/sbin/modprobe enhanceio_lru")
-	run_cmd("/sbin/modprobe enhanceio_rand")
+    mainparser = create_parser()
+    args = mainparser.parse_args()
 
-	if sys.argv[1] == "create":
+    if sys.argv[1] == "create":
 
-		if re.match('^[\w]+$', args.cache) is None:
-			print "Cache name can contain only alphanumeric" + \
-			" characters and underscore ('_')"
-			return FAILURE
+        if re.match('^[\w]+$', args.cache) is None:
+            print "Cache name can contain only alphanumeric" + \
+                " characters and underscore ('_')"
+            return FAILURE
 
-		cache = Cache_rec(name = args.cache, src_name = args.hdd,\
-				ssd_name = args.ssd, policy = args.policy,\
-				mode = args.mode, blksize = args.blksize)
-		return cache.create()
+        cache = Cache_rec(name=args.cache, src_name=args.hdd,
+                          ssd_name=args.ssd, policy=args.policy,
+                          mode=args.mode, blksize=args.blksize)
+        return cache.create()
 
-	elif sys.argv[1] == "info":
-		cache_list = get_caches_list()
-		if not cache_list:		
-			print "No caches Found"
-		else:
-			for cache_name in cache_list:
-				cache = Cache_rec(name = cache_name)
-				cache.get_cache_info()
-				cache.print_info()
+    elif sys.argv[1] == "info":
+        cache_list = get_caches_list()
+        if not cache_list:
+            print "No caches Found"
+        else:
+            for cache_name in cache_list:
+                cache = Cache_rec(name=cache_name)
+                cache.get_cache_info()
+                cache.print_info()
 
-			print "\nFor more information look at " + \
-			      "/proc/enhanceio/<cache_name>/config"
-		return SUCCESS
+            print "\nFor more information look at " + \
+                  "/proc/enhanceio/<cache_name>/config"
+        return SUCCESS
 
-	elif sys.argv[1] == "edit":
-		cache = Cache_rec(name = args.cache, policy = args.policy, mode = args.mode)
-		return cache.edit()
+    elif sys.argv[1] == "edit":
+        setup_kernel_modules()
+        cache = Cache_rec(name=args.cache, policy=args.policy, mode=args.mode)
+        return cache.edit()
 
-	elif sys.argv[1] == "delete":
-		cache = Cache_rec(name = args.cache)
-		return cache.delete()
+    elif sys.argv[1] == "delete":
+        setup_kernel_modules()
+        cache = Cache_rec(name=args.cache)
+        return cache.delete()
 
-	elif sys.argv[1] == "clean":
-		cache = Cache_rec(name = args.cache)
-		return cache.clean()
+    elif sys.argv[1] == "clean":
+        setup_kernel_modules()
+        cache = Cache_rec(name=args.cache)
+        return cache.clean()
 
-	elif sys.argv[1] == "enable":
-		# This command will be fired by udev rule on SSD/Source addition
-		cache = Cache_rec(name = args.cache, src_name = args.hdd,\
-				ssd_name = args.ssd, policy = args.policy,\
-				mode = args.mode, blksize = args.blksize, persistence = 1)
+    elif sys.argv[1] == "enable":
+        setup_kernel_modules()
+        # This command will be fired by udev rule on SSD/Source addition
+        cache = Cache_rec(name=args.cache, src_name=args.hdd,
+                          ssd_name=args.ssd, policy=args.policy,
+                          mode=args.mode, blksize=args.blksize, persistence=1)
 
-		cache.do_eio_ioctl(EIO_IOC_ENABLE)
+        cache.do_eio_ioctl(EIO_IOC_ENABLE)
 
-	elif sys.argv[1] == "notify":
-		# This command will be fired by udev rule on SSD/Source addition
-		if args.action == "reboot":
-			cache = Cache_rec(name = "dummy")
-			cache.do_eio_ioctl(EIO_IOC_ENABLE)
+    elif sys.argv[1] == "notify":
+        setup_kernel_modules()
+        # This command will be fired by udev rule on SSD/Source addition
+        if args.action == "reboot":
+            cache = Cache_rec(name="dummy")
+            cache.do_eio_ioctl(EIO_IOC_ENABLE)
 
-		elif args.action == "add": 
-			if args.ssd:
-				cache = Cache_rec(name = args.cache,\
-						ssd_name = args.ssd, persistence = 1)
-				cache.do_eio_ioctl(EIO_IOC_SSD_ADD)
-				
-			elif args.hdd:
-				cache = Cache_rec(name = args.cache,\
-						ssd_name = args.hdd, persistence = 1)
-				cache.do_eio_ioctl(EIO_IOC_HDD_ADD)
+        elif args.action == "add":
+            if args.ssd:
+                cache = Cache_rec(name=args.cache,
+                                  ssd_name=args.ssd, persistence=1)
+                cache.do_eio_ioctl(EIO_IOC_SSD_ADD)
 
-		elif args.action == "remove":
-			if args.ssd:
-				cache = Cache_rec(name = args.cache, ssd_name = args.ssd,\
-						persistence = 1)
-				cache.do_eio_ioctl(EIO_SSD_REMOVE)
-			elif args.hdd:
-				cache = Cache_rec(name = args.cache, hdd_name = args.hdd,\
-						persistence = 1)
-				cache.do_eio_ioctl(EIO_HDD_REMOVE)
+            elif args.hdd:
+                cache = Cache_rec(name=args.cache,
+                                  ssd_name=args.hdd, persistence=1)
+                cache.do_eio_ioctl(EIO_IOC_HDD_ADD)
 
-		pass
+        elif args.action == "remove":
+            if args.ssd:
+                cache = Cache_rec(name=args.cache, ssd_name=args.ssd,
+                                  persistence=1)
+                cache.do_eio_ioctl(EIO_SSD_REMOVE)
+            elif args.hdd:
+                cache = Cache_rec(name=args.cache, hdd_name=args.hdd,
+                                  persistence=1)
+                cache.do_eio_ioctl(EIO_HDD_REMOVE)
 
-	elif sys.argv[1] == "sanity":
-		# Performs a basic sanity check
-		sanity(args.hdd, args.ssd)
-		return SUCCESS
+        pass
+
+    elif sys.argv[1] == "sanity":
+        # Performs a basic sanity check
+        sanity(args.hdd, args.ssd)
+        return SUCCESS
 
 if __name__ == '__main__':
-	sys.exit(main())
-
+    sys.exit(main())
