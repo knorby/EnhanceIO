@@ -306,6 +306,9 @@ class Cache_rec(Structure):
         self.blksize = int(blksize)
         self.assoc = ASSOCIATIVITY[self.blksize]
 
+    def get_cache_data(self):
+        return load_cache_data(self.name)
+
     def print_info(self):
 
         # Display Cache info
@@ -317,9 +320,9 @@ class Cache_rec(Structure):
         print "Mode             : " + MODE_ID_TO_DESC[self.mode]
         print "Block Size       : " + str(self.blksize)
         print "Associativity    : " + str(self.assoc)
-
         state = self.get_cache_data()['config']['state']
         print "State            : " + str(state)
+        return SUCCESS
 
     def do_eio_ioctl(self, IOC_TYPE):
         # send ioctl to driver
@@ -337,9 +340,6 @@ class Cache_rec(Structure):
         print cmd
         run_cmd(cmd)
 
-    def get_cache_data(self):
-        return load_cache_data(self.name)
-
     def load_cache_info(self):
         # function to extract information from /proc/enhanceio
         config = self.get_cache_data().get('config')
@@ -355,7 +355,7 @@ class Cache_rec(Structure):
 
         return SUCCESS
 
-    def create(self):
+    def create(self, create_udev_rules=True):
 
         src_sz = Dev_info()
         src_sz.get_device_size_info(self.src_name)
@@ -369,7 +369,8 @@ class Cache_rec(Structure):
 
         self.print_info()
         if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
-            self.create_rules()
+            if create_udev_rules:
+                self.create_rules()
             print 'Cache created successfully'
             return SUCCESS
         else:
@@ -495,6 +496,26 @@ class Dev_info:
         pass
 
 
+def print_all_cache_info(print_json=False, json_indent=True):
+    cache_list = get_caches_list()
+    if not cache_list:
+        print "No caches Found"
+        return FAILURE
+    if print_json:
+        caches = {}
+        for cache_name in cache_list:
+            cache = Cache_rec(name=cache_name)
+            caches[cache_name] = cache.get_cache_data()
+        print json.dumps(caches, indent=(4 if json_indent else 0))
+        return SUCCESS
+    else:
+        for cache_name in cache_list:
+            cache = Cache_rec(name=cache_name)
+            cache.load_cache_info()
+            cache.print_info()
+        return SUCCESS
+
+
 def create_parser():
 
     mainparser = ArgumentParser()
@@ -518,8 +539,11 @@ def create_parser():
                              "replacement policy", default="")
 
     # info
-    parser_info = parser.add_parser('info', help='displays information '
-                                    'about currently create caches')
+    parser_info = parser.add_parser(
+        'info', help='displays information about currently create caches')
+    parser_info.add_argument(
+        '--json', action='store_true',
+        help='print detailed info as json instead')
 
     # clean
     parser_clean = parser.add_parser(
@@ -545,6 +569,9 @@ def create_parser():
                                help="block size for cache")
     parser_create.add_argument(
         "-c", action="store", dest="cache", required=True)
+    parser_create.add_argument(
+        "--no-udev", action="store_true", dest="no_udev",
+        help="Skip creating udev rules for the cache")
 
     # enable
     parser_enable = parser.add_parser('enable', help='used to enable cache')
@@ -606,22 +633,10 @@ def main():
         cache = Cache_rec(name=args.cache, src_name=args.hdd,
                           ssd_name=args.ssd, policy=args.policy,
                           mode=args.mode, blksize=args.blksize)
-        return cache.create()
+        return cache.create(create_udev_rules=(not args.no_udev))
 
     elif sys.argv[1] == "info":
-        cache_list = get_caches_list()
-        if not cache_list:
-            print "No caches Found"
-            return FAILURE
-        else:
-            for cache_name in cache_list:
-                cache = Cache_rec(name=cache_name)
-                cache.load_cache_info()
-                cache.print_info()
-
-            print "\nFor more information look at " + \
-                  "/proc/enhanceio/<cache_name>/config"
-        return SUCCESS
+        return print_all_cache_info(print_json=args.json)
 
     elif sys.argv[1] == "edit":
         setup_kernel_modules()
