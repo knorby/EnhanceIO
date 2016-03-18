@@ -26,6 +26,9 @@ import json
 import ctypes
 from fcntl import ioctl
 from argparse import ArgumentParser
+import logging
+
+log = logging.getLogger('eio_cli')
 
 
 # TBD : Change ioctl numbers to comply with linux kernel convention
@@ -215,10 +218,12 @@ def make_udev_match_expr(dev_path, cache_name):
 
 def run_cmd(cmd):
     # Utility function that runs a command
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, shell=True)
+    log.debug("Running subprocess: %s", cmd)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
     output = process.stdout.read()
     ret = process.wait()
+    log.debug("Process returned with %d exit code", ret)
     status = Status(output, ret)
     return status
 
@@ -255,7 +260,7 @@ def load_cache_data(cache_name):
     for data_section in ('config', 'errors', 'io_hist', 'stats'):
         section_fn = os.path.join(cache_data_dir, data_section)
         if not os.access(section_fn, os.R_OK):
-            print "Cannot access %s" % section_fn
+            log.error("Cannot access %s", section_fn)
             continue
         section = {}
         with open(section_fn, 'r') as fd:
@@ -330,14 +335,15 @@ class Cache_rec(ctypes.Structure):
         try:
             if ioctl(fd, ioc_type, ctypes.addressof(self)) == SUCCESS:
                 return SUCCESS
-        except Exception as e:
-            print e
+        except Exception:
+            log.exception("Problem encounteered sending ioctl")
         return IOCTL_FAILURE
 
     def clean(self):
         # do sysctl corresponding to clean
-        cmd = "/sbin/sysctl dev.enhanceio." + self.name + ".do_clean=1"
-        print cmd
+        sysctl_flag = "dev.enhanceio." + self.name + ".do_clean=1"
+        cmd = "/sbin/sysctl " + sysctl_flag
+        log.info("Setting sysctl flag to clean %s", sysctl_flag)
         run_cmd(cmd)
 
     def load_cache_info(self):
@@ -371,11 +377,11 @@ class Cache_rec(ctypes.Structure):
         if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
             if create_udev_rules:
                 self.create_rules()
-            print 'Cache created successfully'
+            log.info('Cache created successfully')
             return SUCCESS
         else:
-            print 'Cache creation failed ' + \
-                '(dmesg can provide you more info)'
+            log.error(
+                'Cache creation failed (dmesg can provide you more info)')
 
         return FAILURE
 
@@ -390,22 +396,22 @@ class Cache_rec(ctypes.Structure):
 
             if self.do_eio_ioctl(EIO_IOC_EDIT) == SUCCESS:
                 self.create_rules()
-                print 'Cache edited Successfully'
+                log.info('Cache edited Successfully')
                 return SUCCESS
             else:
-                print 'Edit cache failed ' + \
-                    '(dmesg can provide you more info)'
+                log.error(
+                    'Edit cache failed (dmesg can provide you more info)')
         else:
-            print 'Requested cache not found'
+            log.error('Requested cache not found')
 
         return FAILURE
 
     def create_rules(self):
 
         source_match_expr = make_udev_match_expr(self.src_name, self.name)
-        print source_match_expr
+        log.debug("Source device udev match expression: %s", source_match_expr)
         cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
-        print cache_match_expr
+        log.debug("Cache device udev match expression: %s", cache_match_expr)
 
         try:
             # XXX: move to format
@@ -426,9 +432,8 @@ class Cache_rec(ctypes.Structure):
             rule_file.write(udev_rule)
             return SUCCESS
 
-        except Exception as e:
-            print "Creation of udev rules file failed\n"
-            print e
+        except Exception:
+            log.exception("Creation of udev rules file failed")
             return FAILURE
 
     def delete(self):
@@ -454,15 +459,14 @@ class Cache_rec(ctypes.Structure):
 
         rule_file_path = os.path.join(
             "/etc/udev/rules.d, 94-enhanceio-%s.rules" % self.name)
-        print "Removing file" + rule_file_path
+        log.info("Removing file %s", rule_file_path)
         try:
             os.remove(rule_file_path)
-            print "Done removing rule file"
+            log.info("Done removing rule file")
             return SUCCESS
-        except Exception as e:
-            print "Unable to delete rule file" + \
-                "(please remove it manually)"
-            print e
+        except Exception:
+            log.exception(
+                "Unable to delete rule file (please remove it manually)")
         return FAILURE
 
 
@@ -473,11 +477,9 @@ class Status:
     def __init__(self, outstr="", outret=0):
         self.output = outstr
         self.ret = outret
-        pass
+
 
 # Block Device class
-
-
 class Dev_info:
 
     dev_size = 0
@@ -499,7 +501,7 @@ class Dev_info:
 def print_all_cache_info(print_json=False, json_indent=True):
     cache_list = get_caches_list()
     if not cache_list:
-        print "No caches Found"
+        log.error("No caches Found")
         return FAILURE
     if print_json:
         caches = {}
@@ -520,6 +522,14 @@ def create_parser():
 
     mainparser = ArgumentParser()
     parser = mainparser.add_subparsers()
+
+    mainparser.add_argument(
+        '--debug', dest='log_level', action='store_const',
+        const=logging.DEBUG, help='Debug level logging',
+        default=logging.INFO)
+    mainparser.add_argument(
+        '--quiet', dest='log_level', action='store_const',
+        const=logging.ERROR, help='Only log errors')
 
     # delete
     parser_delete = parser.add_parser('delete', help='used to delete cache')
@@ -623,11 +633,14 @@ def main():
     mainparser = create_parser()
     args = mainparser.parse_args()
 
-    if sys.argv[1] == "create":
+    logging.basicConfig(level=args.log_level)
 
+    if sys.argv[1] == "create":
+        setup_kernel_modules()
         if re.match('^[\w]+$', args.cache) is None:
-            print "Cache name can contain only alphanumeric" + \
-                " characters and underscore ('_')"
+            mainparser.error(
+                "Cache name can contain only alphanumeric"
+                " characters and underscore ('_')")
             return FAILURE
 
         cache = Cache_rec(name=args.cache, src_name=args.hdd,
