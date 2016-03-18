@@ -18,15 +18,15 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-from ctypes import *
-from fcntl import *
-from argparse import ArgumentParser
-import sys
-import struct
-import subprocess
 import os
+import sys
 import re
+import subprocess
 import json
+import ctypes
+from fcntl import ioctl
+from argparse import ArgumentParser
+
 
 # TBD : Change ioctl numbers to comply with linux kernel convention
 EIODEV = '/dev/eiodev'
@@ -269,23 +269,23 @@ def load_cache_data(cache_name):
 
 
 # Class that represents cache. Also used to pass ioctl to driver
-class Cache_rec(Structure):
+class Cache_rec(ctypes.Structure):
     _fields_ = [
-        ("name", c_char * 32),
-        ("src_name", c_char * 128),
-        ("ssd_name", c_char * 128),
-        ("ssd_uuid", c_char * 128),
-        ("src_size", c_ulonglong),
-        ("ssd_size", c_ulonglong),
-        ("src_sector_size", c_uint),
-        ("ssd_sector_size", c_uint),
-        ("flags", c_uint),
-        ("policy", c_byte),
-        ("mode", c_byte),
-        ("persistence", c_byte),
-        ("cold_boot", c_byte),
-        ("blksize", c_ulonglong),
-        ("assoc", c_ulonglong)
+        ("name", ctypes.c_char * 32),
+        ("src_name", ctypes.c_char * 128),
+        ("ssd_name", ctypes.c_char * 128),
+        ("ssd_uuid", ctypes.c_char * 128),
+        ("src_size", ctypes.c_ulonglong),
+        ("ssd_size", ctypes.c_ulonglong),
+        ("src_sector_size", ctypes.c_uint),
+        ("ssd_sector_size", ctypes.c_uint),
+        ("flags", ctypes.c_uint),
+        ("policy", ctypes.c_byte),
+        ("mode", ctypes.c_byte),
+        ("persistence", ctypes.c_byte),
+        ("cold_boot", ctypes.c_byte),
+        ("blksize", ctypes.c_ulonglong),
+        ("assoc", ctypes.c_ulonglong)
     ]
 
     def __init__(self, name, src_name="", ssd_name="", src_size=0,
@@ -324,11 +324,11 @@ class Cache_rec(Structure):
         print "State            : " + str(state)
         return SUCCESS
 
-    def do_eio_ioctl(self, IOC_TYPE):
+    def do_eio_ioctl(self, ioc_type):
         # send ioctl to driver
         fd = open(EIODEV, "r")
         try:
-            if ioctl(fd, IOC_TYPE, addressof(self)) == SUCCESS:
+            if ioctl(fd, ioc_type, ctypes.addressof(self)) == SUCCESS:
                 return SUCCESS
         except Exception as e:
             print e
@@ -636,6 +636,7 @@ def main():
         return cache.create(create_udev_rules=(not args.no_udev))
 
     elif sys.argv[1] == "info":
+        setup_kernel_modules()
         return print_all_cache_info(print_json=args.json)
 
     elif sys.argv[1] == "edit":
@@ -678,17 +679,17 @@ def main():
             elif args.hdd:
                 cache = Cache_rec(name=args.cache,
                                   ssd_name=args.hdd, persistence=1)
-                return cache.do_eio_ioctl(EIO_IOC_HDD_ADD)
+                return cache.do_eio_ioctl(EIO_IOC_SRC_ADD)
 
         elif args.action == "remove":
             if args.ssd:
                 cache = Cache_rec(name=args.cache, ssd_name=args.ssd,
                                   persistence=1)
-                return cache.do_eio_ioctl(EIO_SSD_REMOVE)
+                return cache.do_eio_ioctl(EIO_IOC_SSD_REMOVE)
             elif args.hdd:
                 cache = Cache_rec(name=args.cache, hdd_name=args.hdd,
                                   persistence=1)
-                return cache.do_eio_ioctl(EIO_HDD_REMOVE)
+                return cache.do_eio_ioctl(EIO_IOC_SRC_REMOVE)
 
         pass
 
