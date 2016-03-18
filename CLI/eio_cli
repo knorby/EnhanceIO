@@ -26,6 +26,7 @@ import struct
 import subprocess
 import os
 import re
+import json
 
 # TBD : Change ioctl numbers to comply with linux kernel convention
 EIODEV = '/dev/eiodev'
@@ -44,6 +45,8 @@ IOC_BLKGETSIZE64 = 0x80081272
 IOC_SECTSIZE = 0x1268
 SUCCESS = 0
 FAILURE = 3
+IOCTL_FAILURE = 5
+
 
 MODE_ID_TO_DESC = {3: "Write Through", 1: "Write Back", 2: "Read Only"}
 # XXX: really, IDS and NAMES should be reversed, but both are confusing
@@ -326,7 +329,7 @@ class Cache_rec(Structure):
                 return SUCCESS
         except Exception as e:
             print e
-        return FAILURE
+        return IOCTL_FAILURE
 
     def clean(self):
         # do sysctl corresponding to clean
@@ -609,6 +612,7 @@ def main():
         cache_list = get_caches_list()
         if not cache_list:
             print "No caches Found"
+            return FAILURE
         else:
             for cache_name in cache_list:
                 cache = Cache_rec(name=cache_name)
@@ -641,35 +645,35 @@ def main():
                           ssd_name=args.ssd, policy=args.policy,
                           mode=args.mode, blksize=args.blksize, persistence=1)
 
-        cache.do_eio_ioctl(EIO_IOC_ENABLE)
+        return cache.do_eio_ioctl(EIO_IOC_ENABLE)
 
     elif sys.argv[1] == "notify":
         setup_kernel_modules()
         # This command will be fired by udev rule on SSD/Source addition
         if args.action == "reboot":
             cache = Cache_rec(name="dummy")
-            cache.do_eio_ioctl(EIO_IOC_ENABLE)
+            return cache.do_eio_ioctl(EIO_IOC_ENABLE)
 
         elif args.action == "add":
             if args.ssd:
                 cache = Cache_rec(name=args.cache,
                                   ssd_name=args.ssd, persistence=1)
-                cache.do_eio_ioctl(EIO_IOC_SSD_ADD)
+                return cache.do_eio_ioctl(EIO_IOC_SSD_ADD)
 
             elif args.hdd:
                 cache = Cache_rec(name=args.cache,
                                   ssd_name=args.hdd, persistence=1)
-                cache.do_eio_ioctl(EIO_IOC_HDD_ADD)
+                return cache.do_eio_ioctl(EIO_IOC_HDD_ADD)
 
         elif args.action == "remove":
             if args.ssd:
                 cache = Cache_rec(name=args.cache, ssd_name=args.ssd,
                                   persistence=1)
-                cache.do_eio_ioctl(EIO_SSD_REMOVE)
+                return cache.do_eio_ioctl(EIO_SSD_REMOVE)
             elif args.hdd:
                 cache = Cache_rec(name=args.cache, hdd_name=args.hdd,
                                   persistence=1)
-                cache.do_eio_ioctl(EIO_HDD_REMOVE)
+                return cache.do_eio_ioctl(EIO_HDD_REMOVE)
 
         pass
 
