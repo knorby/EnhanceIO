@@ -51,7 +51,7 @@ MODE_IDS = {"wt": 3, "wb": 1, "ro": 2}
 MODE_NAMES = {v: k for k, v in MODE_IDS.viewitems()}
 POLICY_NAMES = {3: "rand", 1: "fifo", 2: "lru"}
 POLICY_IDS = {v: k for k, v in POLICY_NAMES.viewitems()}
-BLKSIZES = [2048, 4096, 8192]
+BLKSIZES = (2048, 4096, 8192)
 ASSOCIATIVITY = {2048: 128, 4096: 256, 8192: 512}
 
 FIOCMD = "fio --rw=randrw --verify=meta --verify_pattern=0x3982 --ioengine=libaio \
@@ -182,7 +182,7 @@ def make_udev_match_expr(dev_path, cache_name):
                         '", ENV{MD_DEV_UUID}=="' + \
                         '", ATTR{partition}=="' + partition_num + '"'
                     return match_expr
-            except IOError as e:
+            except IOError:
                 pass
 
     # Partition
@@ -244,6 +244,27 @@ def sanity(hdd, ssd):
                 cache.delete()
 
 
+def load_cache_data(cache_name):
+    cache_data_dir = os.path.join('/proc/enhanceio', cache_name)
+    if not os.access(cache_data_dir, os.R_OK | os.X_OK):
+        raise OSError('Cannot access cache data for %s cache' % cache_name)
+    data = {}
+    for data_section in ('config', 'errors', 'io_hist', 'stats'):
+        section_fn = os.path.join(cache_data_dir, data_section)
+        if not os.access(section_fn, os.R_OK):
+            print "Cannot access %s" % section_fn
+            continue
+        section = {}
+        with open(section_fn, 'r') as fd:
+            for line in fd:
+                data_key, value = line.split(None, 1)
+                if value.isdigit():
+                    value = int(value)
+                section[data_key] = value
+        data[data_section] = section
+    return data
+
+
 # Class that represents cache. Also used to pass ioctl to driver
 class Cache_rec(Structure):
     _fields_ = [
@@ -294,17 +315,12 @@ class Cache_rec(Structure):
         print "Block Size       : " + str(self.blksize)
         print "Associativity    : " + str(self.assoc)
 
-        if os.path.exists("/proc/enhanceio/" + self.name):
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep state"
-            status = run_cmd(cmd)
-            print "State            : " + status.output.split()[1]
-
-        pass
+        state = self.get_cache_data()['config']['state']
+        print "State            : " + str(state)
 
     def do_eio_ioctl(self, IOC_TYPE):
         # send ioctl to driver
         fd = open(EIODEV, "r")
-        fmt = ''
         try:
             if ioctl(fd, IOC_TYPE, addressof(self)) == SUCCESS:
                 return SUCCESS
@@ -317,40 +333,24 @@ class Cache_rec(Structure):
         cmd = "/sbin/sysctl dev.enhanceio." + self.name + ".do_clean=1"
         print cmd
         run_cmd(cmd)
-        pass
 
-    def get_cache_info(self):
+    def get_cache_data(self):
+        return load_cache_data(self.name)
+
+    def load_cache_info(self):
         # function to extract information from /proc/enhanceio
-        status = Status()
+        config = self.get_cache_data().get('config')
+        if not config:
+            return FAILURE
 
-        cache_data_dir = os.path.join("/proc/enhanceio", self.name)
-        if os.path.exists(cache_data_dir):
+        self.src_name = config['src_name']
+        self.ssd_name = config['ssd_name']
+        self.mode = config['mode']
+        self.policy = config['eviction']
+        self.blksize = config['block_size']
+        self.assoc = ASSOCIATIVITY[self.blksize]
 
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep src_name"
-            status = run_cmd(cmd)
-            self.src_name = status.output.split()[1]
-
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep ssd_name"
-            status = run_cmd(cmd)
-            self.ssd_name = status.output.split()[1]
-
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep mode"
-            status = run_cmd(cmd)
-            self.mode = int(status.output.split()[1])
-
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep eviction"
-            status = run_cmd(cmd)
-            self.policy = int(status.output.split()[1])
-
-            cmd = "cat /proc/enhanceio/" + self.name + "/config" + " | grep block_size"
-            status = run_cmd(cmd)
-            self.blksize = int(status.output.split()[1])
-
-            self.assoc = ASSOCIATIVITY[self.blksize]
-
-            return SUCCESS
-
-        return FAILURE
+        return SUCCESS
 
     def create(self):
 
@@ -378,7 +378,7 @@ class Cache_rec(Structure):
     def edit(self):
         mode = self.mode
         policy = self.policy
-        if self.get_cache_info() == SUCCESS:
+        if self.load_cache_info() == SUCCESS:
             if mode != 0:
                 self.mode = mode
             if policy != 0:
@@ -412,7 +412,8 @@ class Cache_rec(Structure):
                 "<cache_match_expr>", cache_match_expr)
             udev_rule = udev_rule.replace("<mode>", MODE_NAMES[self.mode])
             udev_rule = udev_rule.replace("<block_size>", str(self.blksize))
-            udev_rule = udev_rule.replace("<policy>", POLICY_NAMES[self.policy])
+            udev_rule = udev_rule.replace(
+                "<policy>", POLICY_NAMES[self.policy])
 
             # write rule file
             rule_file_path = os.path.join(
@@ -428,7 +429,7 @@ class Cache_rec(Structure):
 
     def delete(self):
 
-        if self.get_cache_info() == FAILURE:
+        if self.load_cache_info() == FAILURE:
             print "No cache exists with the name " + self.name
             return FAILURE
 
@@ -507,8 +508,8 @@ def create_parser():
     parser_edit.add_argument("-c", action="store",
                              dest="cache", required=True)
     parser_edit.add_argument(
-            "-m", action="store", dest="mode", choices=MODE_IDS,
-            help="cache mode", default="")
+        "-m", action="store", dest="mode", choices=MODE_IDS,
+        help="cache mode", default="")
     parser_edit.add_argument("-p", action="store", dest="policy",
                              choices=POLICY_IDS, help="cache "
                              "replacement policy", default="")
@@ -611,7 +612,7 @@ def main():
         else:
             for cache_name in cache_list:
                 cache = Cache_rec(name=cache_name)
-                cache.get_cache_info()
+                cache.load_cache_info()
                 cache.print_info()
 
             print "\nFor more information look at " + \
