@@ -521,7 +521,7 @@ def print_all_cache_info(print_json=False, json_indent=True):
 def create_parser():
 
     mainparser = ArgumentParser()
-    parser = mainparser.add_subparsers()
+    parser = mainparser.add_subparsers(dest='command')
 
     mainparser.add_argument(
         '--debug', dest='log_level', action='store_const',
@@ -635,7 +635,9 @@ def main():
 
     logging.basicConfig(level=args.log_level)
 
-    if sys.argv[1] == "create":
+    command = args.command
+
+    if command == "create":
         setup_kernel_modules()
         if re.match('^[\w]+$', args.cache) is None:
             mainparser.error(
@@ -648,26 +650,26 @@ def main():
                           mode=args.mode, blksize=args.blksize)
         return cache.create(create_udev_rules=(not args.no_udev))
 
-    elif sys.argv[1] == "info":
+    elif command == "info":
         setup_kernel_modules()
         return print_all_cache_info(print_json=args.json)
 
-    elif sys.argv[1] == "edit":
+    elif command == "edit":
         setup_kernel_modules()
         cache = Cache_rec(name=args.cache, policy=args.policy, mode=args.mode)
         return cache.edit()
 
-    elif sys.argv[1] == "delete":
+    elif command == "delete":
         setup_kernel_modules()
         cache = Cache_rec(name=args.cache)
         return cache.delete()
 
-    elif sys.argv[1] == "clean":
+    elif command == "clean":
         setup_kernel_modules()
         cache = Cache_rec(name=args.cache)
         return cache.clean()
 
-    elif sys.argv[1] == "enable":
+    elif command == "enable":
         setup_kernel_modules()
         # This command will be fired by udev rule on SSD/Source addition
         cache = Cache_rec(name=args.cache, src_name=args.hdd,
@@ -676,7 +678,7 @@ def main():
 
         return cache.do_eio_ioctl(EIO_IOC_ENABLE)
 
-    elif sys.argv[1] == "notify":
+    elif command == "notify":
         setup_kernel_modules()
         # This command will be fired by udev rule on SSD/Source addition
         if args.action == "reboot":
@@ -706,7 +708,7 @@ def main():
 
         pass
 
-    elif sys.argv[1] == "sanity":
+    elif command == "sanity":
         # Performs a basic sanity check
         sanity(args.hdd, args.ssd)
         return SUCCESS
