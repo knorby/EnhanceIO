@@ -265,7 +265,7 @@ def load_cache_data(cache_name):
         section = {}
         with open(section_fn, 'r') as fd:
             for line in fd:
-                data_key, value = line.split(None, 1)
+                data_key, value = line.strip().split(None, 1)
                 if value.isdigit():
                     value = int(value)
                 section[data_key] = value
@@ -314,7 +314,7 @@ class Cache_rec(ctypes.Structure):
     def get_cache_data(self):
         return load_cache_data(self.name)
 
-    def print_info(self):
+    def print_info(self, print_state=True):
 
         # Display Cache info
 
@@ -325,8 +325,9 @@ class Cache_rec(ctypes.Structure):
         print "Mode             : " + MODE_ID_TO_DESC.get(self.mode, 'N/A')
         print "Block Size       : " + str(self.blksize)
         print "Associativity    : " + str(self.assoc)
-        state = self.get_cache_data()['config']['state']
-        print "State            : " + str(state)
+        if print_state:
+            state = self.get_cache_data()['config']['state']
+            print "State            : " + str(state)
         return SUCCESS
 
     def do_eio_ioctl(self, ioc_type):
@@ -373,7 +374,7 @@ class Cache_rec(ctypes.Structure):
         self.ssd_size = ssd_sz.dev_size
         self.ssd_sector_size = ssd_sz.dev_sect_size
 
-        self.print_info()
+        self.print_info(print_state=False)
         if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
             if create_udev_rules:
                 self.create_rules()
@@ -451,7 +452,8 @@ class Cache_rec(ctypes.Structure):
         else:
             print 'Cache deletion failed (dmesg can provide you more info)'
 
-        os.remove(delete_fn)
+        if os.path.exists(delete_fn):
+            os.remove(delete_fn)
 
         return FAILURE
 
