@@ -296,7 +296,7 @@ class Cache_rec(ctypes.Structure):
     def __init__(self, name, src_name="", ssd_name="", src_size=0,
                  ssd_size=0, src_sector_size=0, ssd_sector_size=0,
                  flags=0, policy="", mode="", persistence=0, cold_boot="",
-                 blksize="", assoc=""):
+                 blksize=0, assoc=""):
         self.name = name
         self.src_name = src_name
         self.ssd_name = ssd_name
@@ -305,11 +305,11 @@ class Cache_rec(ctypes.Structure):
         self.ssd_size = ssd_size
         self.ssd_sector_size = ssd_sector_size
         self.flags = flags
-        self.policy = POLICY_IDS[policy]
-        self.mode = MODE_IDS[mode]
+        self.policy = POLICY_IDS.get(policy, 0)
+        self.mode = MODE_IDS.get(mode, 0)
         self.persistence = persistence
         self.blksize = int(blksize)
-        self.assoc = ASSOCIATIVITY[self.blksize]
+        self.assoc = ASSOCIATIVITY.get(self.blksize, 0)
 
     def get_cache_data(self):
         return load_cache_data(self.name)
@@ -321,8 +321,8 @@ class Cache_rec(ctypes.Structure):
         print "Cache Name       : " + self.name
         print "Source Device    : " + self.src_name
         print "SSD Device       : " + self.ssd_name
-        print "Policy           : " + POLICY_NAMES[self.policy]
-        print "Mode             : " + MODE_ID_TO_DESC[self.mode]
+        print "Policy           : " + POLICY_NAMES.get(self.policy, 'N/A')
+        print "Mode             : " + MODE_ID_TO_DESC.get(self.mode, 'N/A')
         print "Block Size       : " + str(self.blksize)
         print "Associativity    : " + str(self.assoc)
         state = self.get_cache_data()['config']['state']
@@ -357,7 +357,7 @@ class Cache_rec(ctypes.Structure):
         self.mode = config['mode']
         self.policy = config['eviction']
         self.blksize = config['block_size']
-        self.assoc = ASSOCIATIVITY[self.blksize]
+        self.assoc = ASSOCIATIVITY.get(self.blksize, 0)
 
         return SUCCESS
 
@@ -420,10 +420,10 @@ class Cache_rec(ctypes.Structure):
                 "<source_match_expr>", source_match_expr)
             udev_rule = udev_rule.replace(
                 "<cache_match_expr>", cache_match_expr)
-            udev_rule = udev_rule.replace("<mode>", MODE_NAMES[self.mode])
+            udev_rule = udev_rule.replace("<mode>", MODE_NAMES.get(self.mode, 'N/A'))
             udev_rule = udev_rule.replace("<block_size>", str(self.blksize))
             udev_rule = udev_rule.replace(
-                "<policy>", POLICY_NAMES[self.policy])
+                "<policy>", POLICY_NAMES.get(self.policy, 'N/A'))
 
             # write rule file
             rule_file_path = os.path.join(
