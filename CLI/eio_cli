@@ -363,16 +363,8 @@ class Cache_rec(ctypes.Structure):
         return SUCCESS
 
     def create(self, create_udev_rules=True):
-
-        src_sz = Dev_info()
-        src_sz.get_device_size_info(self.src_name)
-        self.src_size = src_sz.dev_size
-        self.src_sector_size = src_sz.dev_sect_size
-
-        ssd_sz = Dev_info()
-        ssd_sz.get_device_size_info(self.ssd_name)
-        self.ssd_size = ssd_sz.dev_size
-        self.ssd_sector_size = ssd_sz.dev_sect_size
+        self.src_sz, self.src_sector_size = get_device_size_info(self.src_name)
+        self.ssd_sz, self.ssd_sector_size = get_device_size_info(self.ssd_name)
 
         self.print_info(print_state=False)
         if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
@@ -481,23 +473,18 @@ class Status:
         self.ret = outret
 
 
-# Block Device class
-class Dev_info:
 
-    dev_size = 0
-    dev_sect_size = 0
-
-    def get_device_size_info(self, name):
-        if not os.access(name, os.R_OK):
-            raise OSError('Device %s cannot be accessed' % name)
-
-        status = run_cmd("blockdev --getsize64 " + name)
-        self.dev_size = int(status.output.split()[0])
-
-        status = run_cmd("blockdev --getss " + name)
-        self.dev_sect_size = int(status.output.split()[0])
-
-        pass
+def get_device_size_info(device_name):
+    if not os.access(device_name, os.R_OK):
+        raise OSError('Device %s cannot be accessed' % device_name)
+        
+    status = run_cmd("blockdev --getsize64 " + device_name)
+    dev_size = int(status.output.split()[0])
+    
+    status = run_cmd("blockdev --getss " + device_name)
+    dev_sect_size = int(status.output.split()[0])
+    
+    return dev_size, dev_sect_size
 
 
 def print_all_cache_info(print_json=False, json_indent=True):
