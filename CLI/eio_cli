@@ -62,7 +62,7 @@ ASSOCIATIVITY = {2048: 128, 4096: 256, 8192: 512}
 
 FIOCMD = "fio --rw=randrw --verify=meta --verify_pattern=0x3982 --ioengine=libaio \
         --iodepth=16 --direct=1 --size=1G --bsrange=512-128K --numjobs=10 \
-        --group_reporting --time_based --runtime=180 --name=job1 --filename="
+        --group_reporting --time_based --runtime=180 --name=job1 --filename=%s"
 
 udev_template = """
 ACTION!="add|change", GOTO="EIO_EOF"
@@ -159,12 +159,11 @@ LABEL="EIO_EOF"
 
 
 def make_udev_match_expr(dev_path, cache_name):
-    dict_udev = {}
-    status = run_cmd("udevadm info --query=property --name=" + dev_path)
-    for line in status.output.split('\n'):
-        if line is not '':
-            temp = line.split("=", 1)
-            dict_udev[temp[0].strip()] = temp[1].strip()
+    proc = run_cmd(
+        ["udevadm", "info", "--query=property", "--name=%s" % dev_path])
+    dict_udev = {kv[0].strip(): kv[1].strip() for kv in
+                 (line.split('=', 1) for line in
+                  proc.stdout.read().splitlines() if line)}
 
     # DM devices
     if dict_udev["DEVTYPE"] == "disk" and "DM_UUID" in dict_udev:
@@ -216,20 +215,17 @@ def make_udev_match_expr(dev_path, cache_name):
         return match_expr
 
 
-def run_cmd(cmd):
+def run_cmd(cmd, shell=False):
     # Utility function that runs a command
     log.debug("Running subprocess: %s", cmd)
     process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-    output = process.stdout.read()
     ret = process.wait()
     log.debug("Process returned with %d exit code", ret)
-    status = Status(output, ret)
-    return status
+    return process
 
 
 def get_caches_list():
-
     # Utility function that obtains cache list
     cache_list = [f for f in os.listdir('/proc/enhanceio/')]
     for name in cache_list:
@@ -244,11 +240,14 @@ def sanity(hdd, ssd):
     for mode in MODE_IDS.viewkeys():
         for policy in POLICY_IDS.viewkeys():
             for blksize in BLKSIZES:
+                log.debug('Running fio test with mode %s and policy '
+                          '%s on HDD %s and SSD %s',
+                          mode, policy, hdd, ssd)
                 cache = Cache_rec(name="test_cache", src_name=hdd,
                                   ssd_name=ssd, policy=policy, mode=mode,
                                   blksize=blksize)
                 cache.create()
-                run_cmd(FIOCMD + hdd)
+                run_cmd(FIOCMD % hdd, shell=True)
                 cache.delete()
 
 
@@ -413,7 +412,8 @@ class Cache_rec(ctypes.Structure):
                 "<source_match_expr>", source_match_expr)
             udev_rule = udev_rule.replace(
                 "<cache_match_expr>", cache_match_expr)
-            udev_rule = udev_rule.replace("<mode>", MODE_NAMES.get(self.mode, 'N/A'))
+            udev_rule = udev_rule.replace(
+                "<mode>", MODE_NAMES.get(self.mode, 'N/A'))
             udev_rule = udev_rule.replace("<block_size>", str(self.blksize))
             udev_rule = udev_rule.replace(
                 "<policy>", POLICY_NAMES.get(self.policy, 'N/A'))
@@ -436,13 +436,15 @@ class Cache_rec(ctypes.Structure):
             return FAILURE
 
         delete_fn = os.path.join("/dev/enhanceio", self.name, ".eio_delete")
-        run_cmd("/bin/touch %s" % delete_fn)
+        with open(delete_fn, 'w'):
+            log.debug(
+                'Touching %s cache delete file, %s', self.name, delete_fn)
 
         if self.do_eio_ioctl(EIO_IOC_DELETE) == SUCCESS:
             if self.delete_rules() == SUCCESS:
                 return SUCCESS
         else:
-            print 'Cache deletion failed (dmesg can provide you more info)'
+            log.error('Cache deletion failed (dmesg can provide you more info)')
 
         if os.path.exists(delete_fn):
             os.remove(delete_fn)
@@ -464,26 +466,13 @@ class Cache_rec(ctypes.Structure):
         return FAILURE
 
 
-class Status:
-    output = ""
-    ret = 0
-
-    def __init__(self, outstr="", outret=0):
-        self.output = outstr
-        self.ret = outret
-
-
-
 def get_device_size_info(device_name):
     if not os.access(device_name, os.R_OK):
         raise OSError('Device %s cannot be accessed' % device_name)
-        
-    status = run_cmd("blockdev --getsize64 " + device_name)
-    dev_size = int(status.output.split()[0])
-    
-    status = run_cmd("blockdev --getss " + device_name)
-    dev_sect_size = int(status.output.split()[0])
-    
+    proc = run_cmd(["blockdev", "--getsize64", device_name])
+    dev_size = int(proc.stdout.split()[0])
+    proc = run_cmd(["blockdev", "--getss", device_name])
+    dev_sect_size = int(proc.stdout.read().split()[0])
     return dev_size, dev_sect_size
 
 
@@ -611,10 +600,16 @@ def create_parser():
 
 
 def setup_kernel_modules():
-    run_cmd("/sbin/modprobe enhanceio")
-    run_cmd("/sbin/modprobe enhanceio_fifo")
-    run_cmd("/sbin/modprobe enhanceio_lru")
-    run_cmd("/sbin/modprobe enhanceio_rand")
+    ret = (
+        run_cmd("/sbin/modprobe enhanceio").returncode == 0 and
+        run_cmd("/sbin/modprobe enhanceio_fifo").returncode == 0 and
+        run_cmd("/sbin/modprobe enhanceio_lru").returncode == 0 and
+        run_cmd("/sbin/modprobe enhanceio_rand").returncode == 0
+    )
+    if not ret:
+        log.error('Failed to load enhanceio kernel modules. Ensure it is '
+                  'properly installed for the current kernel.')
+    return ret
 
 
 def main():
