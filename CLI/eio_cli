@@ -219,7 +219,7 @@ def run_cmd(cmd, shell=False):
     # Utility function that runs a command
     log.debug("Running subprocess: %s", cmd)
     process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=shell)
     ret = process.wait()
     log.debug("Process returned with %d exit code", ret)
     return process
@@ -475,7 +475,7 @@ def get_device_size_info(device_name):
     if not os.access(device_name, os.R_OK):
         raise OSError('Device %s cannot be accessed' % device_name)
     proc = run_cmd(["blockdev", "--getsize64", device_name])
-    dev_size = int(proc.stdout.split()[0])
+    dev_size = int(proc.stdout.read().split()[0])
     proc = run_cmd(["blockdev", "--getss", device_name])
     dev_sect_size = int(proc.stdout.read().split()[0])
     return dev_size, dev_sect_size
@@ -609,10 +609,10 @@ def create_parser():
 
 def setup_kernel_modules():
     ret = (
-        run_cmd("/sbin/modprobe enhanceio").returncode == 0 and
-        run_cmd("/sbin/modprobe enhanceio_fifo").returncode == 0 and
-        run_cmd("/sbin/modprobe enhanceio_lru").returncode == 0 and
-        run_cmd("/sbin/modprobe enhanceio_rand").returncode == 0
+        run_cmd(["/sbin/modprobe", "enhanceio"]).returncode == 0 and
+        run_cmd(["/sbin/modprobe", "enhanceio_fifo"]).returncode == 0 and
+        run_cmd(["/sbin/modprobe", "enhanceio_lru"]).returncode == 0 and
+        run_cmd(["/sbin/modprobe", "enhanceio_rand"]).returncode == 0
     )
     if not ret:
         log.error('Failed to load enhanceio kernel modules. Ensure it is '
