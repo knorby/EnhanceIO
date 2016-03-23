@@ -342,9 +342,13 @@ class Cache_rec(ctypes.Structure):
     def clean(self):
         # do sysctl corresponding to clean
         sysctl_flag = "dev.enhanceio." + self.name + ".do_clean=1"
-        cmd = "/sbin/sysctl " + sysctl_flag
         log.info("Setting sysctl flag to clean %s", sysctl_flag)
-        run_cmd(cmd)
+        proc = run_cmd(["/sbin/sysctl",  sysctl_flag])
+        if proc.returncode == 0:
+            return SUCCESS
+        else:
+            log.error('Failed to set sysctl clean flag')
+            return FAILURE
 
     def load_cache_info(self):
         # function to extract information from /proc/enhanceio
@@ -420,7 +424,7 @@ class Cache_rec(ctypes.Structure):
 
             # write rule file
             rule_file_path = os.path.join(
-                "/etc/udev/rules.d, 94-enhanceio-%s.rules" % self.name)
+                "/etc/udev/rules.d", "94-enhanceio-%s.rules" % self.name)
             rule_file = open(rule_file_path, "w")
             rule_file.write(udev_rule)
             return SUCCESS
@@ -444,7 +448,8 @@ class Cache_rec(ctypes.Structure):
             if self.delete_rules() == SUCCESS:
                 return SUCCESS
         else:
-            log.error('Cache deletion failed (dmesg can provide you more info)')
+            log.error(
+                'Cache deletion failed (dmesg can provide you more info)')
 
         if os.path.exists(delete_fn):
             os.remove(delete_fn)
@@ -454,7 +459,7 @@ class Cache_rec(ctypes.Structure):
     def delete_rules(self):
 
         rule_file_path = os.path.join(
-            "/etc/udev/rules.d, 94-enhanceio-%s.rules" % self.name)
+            "/etc/udev/rules.d", "94-enhanceio-%s.rules" % self.name)
         log.info("Removing file %s", rule_file_path)
         try:
             os.remove(rule_file_path)
@@ -530,8 +535,11 @@ def create_parser():
     parser_info = parser.add_parser(
         'info', help='displays information about currently create caches')
     parser_info.add_argument(
-        '--json', action='store_true',
+        '-j', '--json', action='store_true',
         help='print detailed info as json instead')
+    parser_info.add_argument(
+        '-c', '--compact', action='store_true',
+        help='Use compact json formatting')
 
     # clean
     parser_clean = parser.add_parser(
@@ -636,7 +644,8 @@ def main():
 
     elif command == "info":
         setup_kernel_modules()
-        return print_all_cache_info(print_json=args.json)
+        return print_all_cache_info(
+            print_json=args.json, json_indent=(not args.compact))
 
     elif command == "edit":
         setup_kernel_modules()
