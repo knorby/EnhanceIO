@@ -409,6 +409,11 @@ class Cache_rec(ctypes.Structure):
         cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
         log.debug("Cache device udev match expression: %s", cache_match_expr)
 
+        if not cache_match_expr or not source_match_expr:
+            log.error('Unable to determine udev cache match expressions. '
+                      'File will not be written.')
+            return FAILURE
+
         try:
             # XXX: move to format
             udev_rule = udev_template.replace("<cache_name>", self.name)
@@ -440,9 +445,13 @@ class Cache_rec(ctypes.Structure):
             return FAILURE
 
         delete_fn = os.path.join("/dev/enhanceio", self.name, ".eio_delete")
-        with open(delete_fn, 'w'):
-            log.debug(
-                'Touching %s cache delete file, %s', self.name, delete_fn)
+        try:
+            with open(delete_fn, 'w'):
+                log.debug(
+                    'Touching %s cache delete file, %s', self.name, delete_fn)
+        except IOError:
+            # this happens frequently. Unclear if it ever worked.
+            log.debug('Failed to remove %s', delete_fn)
 
         if self.do_eio_ioctl(EIO_IOC_DELETE) == SUCCESS:
             if self.delete_rules() == SUCCESS:
