@@ -68,8 +68,12 @@ udev_template = """
 ACTION!="add|change", GOTO="EIO_EOF"
 SUBSYSTEM!="block", GOTO="EIO_EOF"
 
-<cache_match_expr>, GOTO="EIO_CACHE"
-<source_match_expr>, GOTO="EIO_SOURCE"
+ENV{ID_FS_UUID}=="<cache_uuid>", GOTO="EIO_CACHE"
+ENV{MD_DEV_UUID}=="<cache_uuid>", GOTO="EIO_CACHE"
+ENV{DM_UUID}=="<cache_uuid>", GOTO="EIO_CACHE"
+ENV{ID_FS_UUID}=="<source_uuid>", GOTO="EIO_SOURCE"
+ENV{MD_DEV_UUID}=="<source_uuid>", GOTO="EIO_SOURCE"
+ENV{DM_UUID}=="<source_uuid>", GOTO="EIO_SOURCE"
 
 # If none of the rules above matched then it isn't an \
 EnhanceIO device so ignore it.
@@ -158,61 +162,26 @@ LABEL="EIO_EOF"
 """
 
 
-def make_udev_match_expr(dev_path, cache_name):
+def get_device_uuid(dev_path):
     proc = run_cmd(
         ["udevadm", "info", "--query=property", "--name=%s" % dev_path])
     dict_udev = {kv[0].strip(): kv[1].strip() for kv in
                  (line.split('=', 1) for line in
                   proc.stdout.read().splitlines() if line)}
 
-    # DM devices
-    if dict_udev["DEVTYPE"] == "disk" and "DM_UUID" in dict_udev:
-        match_expr = 'ENV{DM_UUID}=="' + dict_udev["DM_UUID"] + \
-            '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
-        return match_expr
-
-    # MD devices
-    if "MD_UUID" in dict_udev:
-        if dict_udev["DEVTYPE"] == "disk" and \
-                "MD_DEV_UUID" not in dict_udev:
-            match_expr = 'ENV{MD_UUID}=="' + dict_udev["MD_UUID"] + \
-                '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
-            return match_expr
-
-        elif dict_udev["DEVTYPE"] == "partition":
-            try:
-                with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
-                    partition_num = f.read().strip()
-                    match_expr = 'ENV{MD_UUID}=="' + \
-                        '", ENV{MD_DEV_UUID}=="' + \
-                        '", ATTR{partition}=="' + partition_num + '"'
-                    return match_expr
-            except IOError:
-                pass
-
-    # Partition
-    if dict_udev["DEVTYPE"] == "partition" and "ID_SERIAL" in dict_udev:
-        try:
-            with open("/sys" + dict_udev["DEVPATH"] + "/partition") as f:
-                partition_num = f.read().strip()
-                match_expr = 'ENV{ID_SERIAL}=="' + \
-                    dict_udev["ID_SERIAL"] + \
-                    '", ATTR{partition}=="' + partition_num + '"'
-                return match_expr
-        except IOError:
-            pass
-
-    # Disk
-    if dict_udev["DEVTYPE"] == "disk" and "ID_SERIAL" in dict_udev:
-        match_expr = 'ENV{ID_SERIAL}=="' + dict_udev["ID_SERIAL"] + \
-            '", ENV{DEVTYPE}=="' + dict_udev["DEVTYPE"] + '"'
-        return match_expr
-
-    # Partition or disk w/ filesystem
-    if "ID_FS_UUID" in dict_udev:
-        match_expr = 'ENV{DM_NAME}!="' + cache_name + \
-            '", ENV{ID_FS_UUID}=="' + dict_udev["ID_FS_UUID"] + '"'
-        return match_expr
+    if 'DM_UUID' in dict_udev:
+        return dict_udev['DM_UUID']
+    elif 'MD_UUID' in dict_udev:
+        return dict_udev['MD_UUID']
+    elif 'ID_FS_UUID' in dict_udev:
+        return dict_udev['ID_FS_UUID']
+    else:
+        log.error(
+            'No UUID found for "%s" device, which is required for udev '
+            'discovery. Consider creating a filesystem on the device first.',
+            dev_path
+        )
+        return None
 
 
 def run_cmd(cmd, shell=False):
@@ -236,7 +205,6 @@ def get_caches_list():
 
 def sanity(hdd, ssd):
     # Performs a very basic regression of operations
-
     for mode in MODE_IDS.viewkeys():
         for policy in POLICY_IDS.viewkeys():
             for blksize in BLKSIZES:
@@ -366,6 +334,7 @@ class Cache_rec(ctypes.Structure):
         return SUCCESS
 
     def create(self, create_udev_rules=True):
+        # XXX: ensure each device has a UUID before proceeding
         self.src_sz, self.src_sector_size = get_device_size_info(self.src_name)
         self.ssd_sz, self.ssd_sector_size = get_device_size_info(self.ssd_name)
 
@@ -403,24 +372,23 @@ class Cache_rec(ctypes.Structure):
         return FAILURE
 
     def create_rules(self):
+        source_uuid = get_device_uuid(self.src_name)
+        log.debug("Source device udev match UUID: %s", source_uuid)
+        cache_uuid = get_device_uuid(self.ssd_name)
+        log.debug("Cache device udev match expression: %s", cache_uuid)
 
-        source_match_expr = make_udev_match_expr(self.src_name, self.name)
-        log.debug("Source device udev match expression: %s", source_match_expr)
-        cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
-        log.debug("Cache device udev match expression: %s", cache_match_expr)
-
-        if not cache_match_expr or not source_match_expr:
-            log.error('Unable to determine udev cache match expressions. '
-                      'File will not be written.')
+        if not source_uuid or not cache_uuid:
+            log.error("The required device UUID's could not be gathered. "
+                      "The udev rules cannot be created.")
             return FAILURE
 
         try:
             # XXX: move to format
             udev_rule = udev_template.replace("<cache_name>", self.name)
             udev_rule = udev_rule.replace(
-                "<source_match_expr>", source_match_expr)
+                "<source_uuid>", source_uuid)
             udev_rule = udev_rule.replace(
-                "<cache_match_expr>", cache_match_expr)
+                "<cache_uuid>", cache_uuid)
             udev_rule = udev_rule.replace(
                 "<mode>", MODE_NAMES.get(self.mode, 'N/A'))
             udev_rule = udev_rule.replace("<block_size>", str(self.blksize))
